@@ -39,8 +39,7 @@ struct inode {
 };
 
 struct node_ref {
-  /* The node pointer is never NULL, unless this is an empty root node.
-     This may be an internal node or a leaf node. */
+  /* A pointer to a leaf or an internal node. It must not be NULL. */
   struct leaf_node *node;
   /* Must be 0 on leaf nodes and must be non zero on internal nodes. */
   size_t height;
@@ -68,6 +67,8 @@ static struct node_ref node_ref_from_root(BTreeMap *map) {
   return (struct node_ref){(struct leaf_node *)map->root, map->height};
 }
 
+#define inode_cast(node_ref) ((struct inode *)((node_ref).node))
+
 /* Check whether this node_ref references a leaf node */
 static inline bool node_ref_is_leaf(struct node_ref node_ref) {
   return node_ref.height == 0;
@@ -79,13 +80,13 @@ static inline bool node_ref_is_full(struct node_ref node_ref) {
 
 /* Get a reference to a child node.
    Warning causes undefined behavior if node_ref is not an internal node or if
-   index is not a valid child node. */
+   the child at index is invalid. */
 static struct node_ref node_ref_descend(struct node_ref node_ref,
                                         ushort index) {
-  assert(node_ref.height != 0);
+  assert(node_ref.height > 0);
   assert(index <= node_ref.node->len);
-  assert(((struct inode *)node_ref.node)->children[index] != NULL);
-  return (struct node_ref){((struct inode *)node_ref.node)->children[index],
+  assert(inode_cast(node_ref)->children[index] != NULL);
+  return (struct node_ref){inode_cast(node_ref)->children[index],
                            node_ref.height - 1};
 }
 
@@ -106,9 +107,9 @@ static inline struct split split_none(void) {
 }
 
 /* Split old_node at index */
-static struct kv node_ref_split_leaf_data(struct leaf_node *old_node,
-                                          struct leaf_node *new_node,
-                                          ushort index) {
+static struct kv node_split_leaf_data(struct leaf_node *old_node,
+                                      struct leaf_node *new_node,
+                                      ushort index) {
   ushort old_len = old_node->len;
   ushort new_len = old_len - index - 1;
   new_node->len = new_len;
@@ -122,18 +123,170 @@ static struct kv node_ref_split_leaf_data(struct leaf_node *old_node,
 static struct split node_ref_split(struct node_ref node, ushort index) {
   if (node_ref_is_leaf(node)) {
     struct leaf_node *new_leaf = leaf_node_new();
-    struct kv kv = node_ref_split_leaf_data(node.node, new_leaf, index);
+    struct kv kv = node_split_leaf_data(node.node, new_leaf, index);
     return (struct split){new_leaf, kv};
   } else {
-    struct inode *old_inode = (struct inode *)node.node;
+    struct inode *old_inode = inode_cast(node);
     struct inode *new_inode = inode_new();
-    struct kv kv = node_ref_split_leaf_data(node.node, &new_inode->data, index);
+    struct kv kv = node_split_leaf_data(node.node, &new_inode->data, index);
     ushort old_len = node.node->len;
     ushort new_len = new_inode->data.len;
     memcpy(new_inode->children, &old_inode->children[index + 1],
            (new_len + 1) * sizeof(struct leaf_node *));
     return (struct split){(struct leaf_node *)new_inode, kv};
   }
+}
+
+static struct kv node_remove_unchecked(struct leaf_node *node, ushort index) {
+  struct kv kv = {node->keys[index], node->vals[index]};
+  if (index < node->len) {
+    /* We have to remove a kv pair from the middle of the arrays. So we have to
+       shift back one or more elements to fill the gap.
+       AB DEF
+        <-|
+       ABDEF
+     */
+    memmove(&node->keys[index], &node->keys[index + 1],
+            (node->len - index - 1) * sizeof(K));
+    memmove(&node->vals[index], &node->vals[index + 1],
+            (node->len - index - 1) * sizeof(V));
+  }
+  node->len -= 1;
+  return kv;
+}
+
+static void node_remove_child(struct inode *node, ushort index) {
+  if (index <= node->data.len) {
+    /* We have to remove a kv pair from the middle of the arrays. So we have to
+       shift back one or more elements to fill the gap.
+       AB DEF
+        <-|
+       ABDEF
+     */
+    memmove(&node->children[index], &node->children[index + 1],
+            (node->data.len - index) * sizeof(struct leaf_node *));
+  }
+}
+
+static void node_ref_borrow_from_left(struct node_ref parent, ushort index) {
+  struct node_ref left = node_ref_descend(parent, index - 1);
+  struct node_ref right = node_ref_descend(parent, index);
+
+  // printf("LEFT:\n");
+  // for (ushort i = 0; i < left.node->len; ++i) {
+  //   printf("%i => %i\n", left.node->keys[i], left.node->vals[i]);
+  // }
+  // printf("RIGHT:\n");
+  // for (ushort i = 0; i < right.node->len; ++i) {
+  //   printf("%i => %i\n", right.node->keys[i], right.node->vals[i]);
+  // }
+
+  ushort left_len = left.node->len;
+  ushort right_len = right.node->len;
+
+  ushort shift = ((right_len + left_len) >> 1) - right_len;
+
+  /* Make space for the borrowed key/values */
+  memmove(&right.node->keys[shift], right.node->keys, right_len * sizeof(K));
+  memmove(&right.node->vals[shift], right.node->vals, right_len * sizeof(V));
+  if (parent.height > 1) {
+    memmove(&inode_cast(right)->children[shift], &inode_cast(right)->children,
+            (right_len + 1) * sizeof(struct leaf_node *));
+  }
+
+  right.node->keys[shift - 1] = parent.node->keys[index - 1];
+  right.node->vals[shift - 1] = parent.node->vals[index - 1];
+
+  parent.node->keys[index - 1] = left.node->keys[left_len - shift];
+  parent.node->vals[index - 1] = left.node->vals[left_len - shift];
+
+  memcpy(right.node->keys, &left.node->keys[left_len - shift + 1],
+         (shift - 1) * sizeof(K));
+  memcpy(right.node->vals, &left.node->vals[left_len - shift + 1],
+         (shift - 1) * sizeof(V));
+  if (parent.height > 1) {
+    memcpy(inode_cast(right)->children,
+           &inode_cast(left)->children[left_len - shift + 1],
+           shift * sizeof(struct leaf_node *));
+  }
+
+  left.node->len -= shift;
+  right.node->len += shift;
+
+  // printf("LEFT:\n");
+  // for (ushort i = 0; i < left.node->len; ++i) {
+  //   printf("%i => %i\n", left.node->keys[i], left.node->vals[i]);
+  // }
+  // printf("RIGHT:\n");
+  // for (ushort i = 0; i < right.node->len; ++i) {
+  //   printf("%i => %i\n", right.node->keys[i], right.node->vals[i]);
+  // }
+}
+
+static void node_ref_borrow_from_right(struct node_ref parent, ushort index) {
+  struct node_ref left = node_ref_descend(parent, index);
+  struct node_ref right = node_ref_descend(parent, index + 1);
+
+  ushort left_len = left.node->len;
+  ushort right_len = right.node->len;
+  ushort shift = ((left_len + right_len) >> 1) - left_len;
+
+  left.node->keys[left_len] = parent.node->keys[index];
+  left.node->vals[left_len] = parent.node->vals[index];
+  memcpy(&left.node->keys[left_len + 1], right.node->keys,
+         (shift - 1) * sizeof(K));
+  memcpy(&left.node->vals[left_len + 1], right.node->vals,
+         (shift - 1) * sizeof(V));
+  if (parent.height > 1) {
+    memcpy(&inode_cast(left)->children[left_len + 1],
+           &inode_cast(right)->children, shift * sizeof(struct leaf_node *));
+  }
+  parent.node->keys[index] = right.node->keys[shift - 1];
+  parent.node->vals[index] = right.node->vals[shift - 1];
+
+  memmove(right.node->keys, &right.node->keys[shift],
+          (right_len - shift) * sizeof(K));
+  memmove(right.node->vals, &right.node->vals[shift],
+          (right_len - shift) * sizeof(V));
+
+  if (parent.height > 1) {
+    memmove(inode_cast(right)->children, &inode_cast(right)->children[shift],
+            (right_len - shift + 1) * sizeof(struct leaf_node *));
+  }
+
+  left.node->len += shift;
+  right.node->len -= shift;
+}
+
+/* Merges child and child_sibling into child, deallocates node and updates
+   parent's children. */
+static void node_ref_merge(struct node_ref parent, ushort index) {
+  assert(!node_ref_is_leaf(parent));
+  struct node_ref left = node_ref_descend(parent, index);
+  struct node_ref right = node_ref_descend(parent, index + 1);
+  ushort left_len = left.node->len;
+  ushort right_len = right.node->len;
+  /* Copy keys and values leaving an uninitialized space for the key/value pair
+     in parent associated with child_sibling. */
+  memcpy(&left.node->keys[left_len + 1], right.node->keys,
+         right_len * sizeof(K));
+  memcpy(&left.node->vals[left_len + 1], right.node->vals,
+         right_len * sizeof(V));
+  if (parent.height > 1) {
+    /* The node is internal, copy children. */
+    memcpy(&inode_cast(left)->children[left_len + 1],
+           inode_cast(right)->children,
+           (right_len + 1) * sizeof(struct leaf_node *));
+  }
+  node_remove_child(inode_cast(parent), index + 1);
+  struct kv kv = node_remove_unchecked(parent.node, index);
+  left.node->keys[left_len] = kv.k;
+  left.node->vals[left_len] = kv.v;
+  left.node->len = left_len + right_len + 1;
+  /* We copied everything we needed to copy from child_sibling, deallocate it.
+     We don't use node_ref_dealloc because it would also get rid of child nodes,
+     whose ownership has been transferred to child. */
+  DEALLOC(right.node);
 }
 
 /* Search for a key inside a node, this uses a linear search, a binary search
@@ -143,7 +296,7 @@ static ushort node_ref_search(struct node_ref node_ref, const K *key,
                               bool *found) {
   ushort i = 0;
   for (; i < node_ref.node->len; ++i) {
-    char cmp = COMPARE(key, &node_ref.node->keys[i]);
+    signed char cmp = COMPARE(key, &node_ref.node->keys[i]);
     if (cmp == 0) {
       *found = true;
     }
@@ -153,8 +306,6 @@ static ushort node_ref_search(struct node_ref node_ref, const K *key,
   }
   return i;
 }
-
-void memmove1(void *dest, void *src, size_t n) { memmove(dest, src, n); }
 
 /* index must be <= node->len */
 static void node_insert_unchecked(struct leaf_node *node, ushort index, K key,
@@ -178,6 +329,48 @@ static void node_insert_unchecked(struct leaf_node *node, ushort index, K key,
   node->len += 1;
 }
 
+static void underflow_left(struct node_ref node_ref, ushort index) {
+  struct node_ref edge_left = node_ref_descend(node_ref, index);
+  if (edge_left.node->len < B - 1) {
+    struct node_ref edge_right = node_ref_descend(node_ref, index + 1);
+    if (edge_right.node->len > B) {
+      node_ref_borrow_from_right(node_ref, index);
+    } else {
+      node_ref_merge(node_ref, index);
+    }
+  }
+}
+
+static void underflow_right(struct node_ref node_ref, ushort index) {
+  struct node_ref edge_right = node_ref_descend(node_ref, index);
+  if (edge_right.node->len < B - 1) {
+    struct node_ref edge_left = node_ref_descend(node_ref, index - 1);
+    if (edge_left.node->len > B) {
+      node_ref_borrow_from_left(node_ref, index);
+    } else {
+      node_ref_merge(node_ref, index - 1);
+    }
+  }
+}
+
+static void check_underflow(struct node_ref node_ref, ushort index) {
+  if (index == 0) {
+    underflow_left(node_ref, index);
+  } else {
+    underflow_right(node_ref, index);
+  }
+}
+
+static struct kv node_remove_least(struct node_ref node_ref) {
+  if (node_ref_is_leaf(node_ref)) {
+    return node_remove_unchecked(node_ref.node, 0);
+  }
+
+  struct kv y = node_remove_least(node_ref_descend(node_ref, 0));
+  check_underflow(node_ref, 0);
+  return y;
+}
+
 static void node_insert_child(struct inode *node, ushort index,
                               struct leaf_node *child) {
   if (index <= node->data.len) {
@@ -190,7 +383,7 @@ static void node_insert_child(struct inode *node, ushort index,
          C
      */
     memmove(&node->children[index + 2], &node->children[index + 1],
-            (node->data.len - index) * sizeof(struct leaf_node *));
+            (node->data.len - index - 1) * sizeof(struct leaf_node *));
   }
   node->children[index + 1] = child;
 }
@@ -252,17 +445,16 @@ static struct split node_insert_with_child(struct node_ref node_ref,
 
   /* We just checked that the node is not full. */
   node_insert_unchecked(node_ref.node, index, key, value);
-  node_insert_child((struct inode *)node_ref.node, index, child);
+  node_insert_child(inode_cast(node_ref), index, child);
 
   return split_none();
 }
 
 static struct split node_insert_recursive(struct node_ref node_ref, K key,
-                                          V value) {
-  bool found = false;
-  ushort index = node_ref_search(node_ref, &key, &found);
+                                          V value, bool *found) {
+  ushort index = node_ref_search(node_ref, &key, found);
 
-  if (found) {
+  if (*found) {
     /* We found the key already in the tree, just update the value. */
     node_ref.node->vals[index] = value;
   } else if (node_ref_is_leaf(node_ref)) {
@@ -271,7 +463,7 @@ static struct split node_insert_recursive(struct node_ref node_ref, K key,
   } else {
     /* Didn't find the key, descend */
     struct split child_split =
-        node_insert_recursive(node_ref_descend(node_ref, index), key, value);
+        node_insert_recursive(node_ref_descend(node_ref, index), key, value, found);
     if (child_split.node != NULL) {
       /* The child was split */
       return node_insert_with_child(node_ref, index, child_split.kv.k,
@@ -282,18 +474,42 @@ static struct split node_insert_recursive(struct node_ref node_ref, K key,
   return split_none();
 }
 
-static void node_ref_dealloc(struct node_ref node_ref) {
+static bool node_remove_recursive(struct node_ref node_ref, const K *key) {
+  bool found = false;
+  ushort index = node_ref_search(node_ref, key, &found);
+  if (found) {
+    if (node_ref_is_leaf(node_ref)) {
+      node_remove_unchecked(node_ref.node, index);
+    } else {
+      struct kv kv = node_remove_least(node_ref_descend(node_ref, index + 1));
+      node_ref.node->keys[index] = kv.k;
+      node_ref.node->vals[index] = kv.v;
+      check_underflow(node_ref, index + 1);
+    }
+    return true;
+  } else if (!node_ref_is_leaf(node_ref) &&
+             node_remove_recursive(node_ref_descend(node_ref, index), key)) {
+    check_underflow(node_ref, index);
+    return true;
+  }
+  return false;
+}
+
+static void node_ref_dealloc_recursive(struct node_ref node_ref) {
   if (node_ref_is_leaf(node_ref)) {
     DEALLOC(node_ref.node);
   } else {
     for (ushort index = 0; index <= node_ref.node->len; ++index) {
-      node_ref_dealloc(node_ref_descend(node_ref, index));
+      node_ref_dealloc_recursive(node_ref_descend(node_ref, index));
     }
     DEALLOC(node_ref.node);
   }
 }
 
-V *btree_map_get(BTreeMap *map, K *const key) {
+V *btree_map_get(BTreeMap *map, const K *key) {
+  if (map->root == NULL) {
+    return NULL;
+  }
   struct node_ref node_ref = node_ref_from_root(map);
   while (true) {
     bool found = false;
@@ -314,17 +530,24 @@ void btree_map_insert(BTreeMap *map, K key, V value) {
   if (map->root == NULL) {
     struct leaf_node *new_root = leaf_node_new();
     node_insert_unchecked(new_root, 0, key, value);
+    map->size = 1;
     map->root = new_root;
+    /* height is only guaranteed to be initialized when root is not NULL. */
     map->height = 0;
     return;
   }
 
+  bool found = false;
   struct split split =
-      node_insert_recursive(node_ref_from_root(map), key, value);
+      node_insert_recursive(node_ref_from_root(map), key, value, &found);
+
+  if (!found) {
+    map->size += 1;
+  }
 
   if (split.node != NULL) {
     /* Root was split. Create a new internal node and treat the old root and the
-       split as child nodes. */
+       split node as child nodes. */
     struct inode *new_root = inode_new();
 
     node_insert_unchecked(&new_root->data, 0, split.kv.k, split.kv.v);
@@ -337,10 +560,33 @@ void btree_map_insert(BTreeMap *map, K key, V value) {
   }
 }
 
+void btree_map_remove(BTreeMap *map, const K *key) {
+  if (map->root == NULL) {
+    return;
+  }
+
+  if (node_remove_recursive(node_ref_from_root(map), key)) {
+    /* We removed an element from the */
+    map->size -= 1;
+
+    if (((struct leaf_node *)map->root)->len == 0) {
+      if (map->height == 0) {
+        DEALLOC(map->root);
+        map->root = NULL;
+        return;
+      }
+      struct inode *old_root = (struct inode *)map->root;
+      map->root = old_root->children[0];
+      map->height -= 1;
+      DEALLOC(old_root);
+    }
+  }
+}
+
 /* deallocate the whole tree */
 void btree_map_dealloc(BTreeMap *map) {
   if (map->root != NULL) {
-    node_ref_dealloc(node_ref_from_root(map));
+    node_ref_dealloc_recursive(node_ref_from_root(map));
   }
 }
 
@@ -350,40 +596,49 @@ void btree_map_clear(BTreeMap *map) {
   map->root = NULL;
 }
 
-static void print_leaf(struct leaf_node *leaf) {
-  for (ushort i = 0; i < leaf->len; ++i) {
-    printf("%i => %i\n", leaf->keys[i], leaf->vals[i]);
-  }
-}
+// static void print_leaf(struct leaf_node *leaf) {
+//   for (ushort i = 0; i < (leaf->len <= CAPACITY ? leaf->len : CAPACITY); ++i) {
+//     printf("%li => %li\n", leaf->keys[i], leaf->vals[i]);
+//   }
+// }
 
-static void print_tree(struct node_ref node_ref) {
-  printf("FULL TREE\n");
-  print_leaf(node_ref.node);
-  if (node_ref.height)
-    for (ushort i = 0; i <= node_ref.node->len; ++i) {
-      printf("%u: {", i);
-      if (node_ref.height <= 1) {
-        print_leaf(node_ref_descend(node_ref, i).node);
-      } else {
-        print_tree(node_ref_descend(node_ref, i));
-      }
-      printf("}\n");
-    }
-}
+// static void print_tree(struct node_ref node_ref) {
+//   printf("ptr: %p\n", node_ref.node);
+//   printf("FULL TREE\n");
+//   print_leaf(node_ref.node);
+//   if (node_ref.height)
+//     for (ushort i = 0; i <= node_ref.node->len; ++i) {
+//       printf("ptr: %p\n", node_ref_descend(node_ref, i).node);
+//       printf("%u: {", i);
+//       if (node_ref.height <= 1) {
+//         print_leaf(node_ref_descend(node_ref, i).node);
+//       } else {
+//         print_tree(node_ref_descend(node_ref, i));
+//       }
+//       printf("}\n");
+//     }
+// }
 
 int main(void) {
-  BTreeMap map = btree_map_new();
-  for (int i = 0; i < 4096; ++i) {
-    btree_map_insert(&map, i, i);
+  BTreeMap *map = NEW(BTreeMap);
+  *map = btree_map_new();
+  for (int i = 0; i < (1 << 16); ++i) {
+    // printf("SIZE: %zu ", map.size);
+    btree_map_insert(map, i, i);
   }
-  printf("\n");
-  for (int i = 0; i < 4096; ++i) {
-    if (i != *btree_map_get(&map, &i)) {
-      printf("ERROR ");
-    }
-    printf("%i ", *btree_map_get(&map, &i));
-  }
-  printf("\n");
-  btree_map_dealloc(&map);
-  printf("%p\n", map.root);
+  printf("SIZE: %zu\n", map->size);
+  // for (int i = 0; i < (1 << 15); ++i) {
+  //   // printf("%i ", i);
+  //   if (i != *btree_map_get(&map, &i)) {
+  //     printf("\nWRONG VALUE\n");
+  //   }
+  //   btree_map_remove(&map, &i);
+  //   if (btree_map_get(&map, &i) != NULL) {
+  //     printf("\nNOT REMOVED\n");
+  //   }
+  // }
+  // printf("\n");
+  btree_map_dealloc(map);
+  printf("%p\n", map->root);
+  DEALLOC(map);
 }

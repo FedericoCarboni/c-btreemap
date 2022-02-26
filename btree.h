@@ -17,24 +17,26 @@
     exit(1);                                                                   \
   })
 
+/* The type of the keys, make sure you also modify COMPARE if you use anything
+   other than integers. */
 #ifndef K
-#define K int
+#define K long long
 #endif
 
+/* The type of the values */
 #ifndef V
-#define V int
+#define V long long
 #endif
 
 #ifndef COMPARE
-char compare(const K *x, const K *y) { return *x == *y ? 0 : *x < *y ? 1 : -1; }
+signed char compare(const K *x, const K *y) { return *x == *y ? 0 : *x < *y ? 1 : -1; }
 #define COMPARE compare
 #endif
 
 typedef struct BTreeMap {
   /* The size of the BTreeMap.
 
-     If `size` is non-zero `root`'s node must be non-null.
-   */
+     If `size` is non-zero `root`'s node must be non-null. */
   size_t size;
 
   /* The root node of the tree */
@@ -53,21 +55,30 @@ static BTreeMap btree_map_new(void) {
   return map;
 }
 
-/* Returns the value associated to key `key` if any, or `NULL` if not found. */
-V *btree_map_get(BTreeMap *map, K *const key);
+/* Returns a pointer to the value associated to key `key` if any, or `NULL`
+   if not found. Note that insert calls may invalidate the pointer. */
+V *btree_map_get(BTreeMap *map, const K *key);
+
+/* Insert or update a value in the tree. May invalidate pointers returned by  */
 void btree_map_insert(BTreeMap *map, K key, V value);
 
+/* Remove a key and its associated value from the map. */
+void btree_map_remove(BTreeMap *map, const K *key);
+
+/* Remove all elements from the map */
 void btree_map_clear(BTreeMap *map);
-/**/
+
+/* Deallocate the memory the map is using. */
 void btree_map_dealloc(BTreeMap *map);
 
 typedef struct BTreeMapIter {
-
+  unsigned short index;
+  size_t height;
 } BTreeMapIter;
 
 /* Whether the iterator is complete. */
 bool btree_map_done(BTreeMapIter *it);
 /* Get the next item on the iterator. */
-void btree_map_next(BTreeMapIter *it, K *key, V *value);
+void btree_map_next(BTreeMapIter *it, K **key, V **value);
 
 #endif /* BTREE_H_ */
