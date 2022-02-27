@@ -72,17 +72,11 @@ void btree_map_insert(BTreeMap *map, K key, V value);
    the iterator. */
 void btree_map_remove(BTreeMap *map, const K *key);
 
-/* Remove all elements from the map. If you need to run a destructor on each
-   element, run btree_map_dealloc_with_destructor before clearing the map. */
+/* Remove all elements from the map. */
 void btree_map_clear(BTreeMap *map);
 
 /* Deallocate the memory the map is using. */
 void btree_map_dealloc(BTreeMap *map);
-
-/* Deallocate the memory the map is using and run a destructor on each key/value
-   pair. */
-void btree_map_dealloc_with_destructor(BTreeMap *map,
-                                       void (*destructor)(K key, V value));
 
 typedef struct BTreeMapIter {
   void *node;
@@ -90,7 +84,7 @@ typedef struct BTreeMapIter {
   unsigned short *indexes;
   size_t max_height;
   size_t height;
-  size_t index;
+  unsigned short index;
 } BTreeMapIter;
 
 /* Iterate through the map in sorted order (sorted by key). While iterating it

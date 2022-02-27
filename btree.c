@@ -643,6 +643,12 @@ bool btree_map_iter_next(BTreeMapIter *it, K **key, V **value) {
         it->indexes[it->height] = it->index;
         it->node = ((struct inode *)it->node)->children[it->index];
         it->index = 0;
+        while (it->height != 0) {
+          it->height -= 1;
+          it->parents[it->height] = it->node;
+          it->indexes[it->height] = 0;
+          it->node = ((struct inode *)it->node)->children[0];
+        }
       }
       return true;
     } else if (it->height >= it->max_height) {
@@ -665,25 +671,19 @@ int main(void) {
   long start_time, end_time, elapsed;
 
   start_time = clock();
-  for (int i = 0; i < (1 << 21); ++i) {
+  for (K i = 0; i < 512; ++i) {
     // printf("SIZE: %zu ", map.size);
-    btree_map_insert(&map, i, i);
+    btree_map_insert(&map, i, (V)i);
   }
   // Do something
   BTreeMapIter it = btree_map_iter(&map);
   K *key;
   V *value;
   while (btree_map_iter_next(&it, &key, &value)) {
-    // if (*key != *value) {
-    //   printf("ERROR");
-    // }
   }
   end_time = clock();
   elapsed = (end_time - start_time) / 1000;
   printf("SIZE: %zu, in: %ld\n", map.size, elapsed);
   btree_map_iter_dealloc(&it);
-  printf("\n");
   btree_map_dealloc(&map);
-  printf("%p\n", map.root);
-  // DEALLOC(map);
 }
