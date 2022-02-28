@@ -465,7 +465,7 @@ static struct split node_insert_recursive(struct node_ref node_ref, K key,
     if (child_split.node != NULL) {
       /* The child was split */
       return node_insert_with_child(node_ref, index, child_split.kv.k,
-                                    child_split.kv.k, child_split.node);
+                                    child_split.kv.v, child_split.node);
     }
   }
 
