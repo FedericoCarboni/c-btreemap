@@ -12,10 +12,10 @@
 #define DEALLOC(ptr) free(ptr)
 /* Define what to do if the allocator returns a NULL pointer */
 #define OOM()                                                                  \
-  {                                                                            \
+  do {                                                                            \
     fprintf(stderr, "Out of memory\n");                                        \
     exit(1);                                                                   \
-  }
+  } while (false);
 
 #define DEALLOC_KEY(key) DEALLOC(key)
 #define DEALLOC_VALUE(value)
@@ -43,7 +43,7 @@ struct btree_map {
   size_t size;
 
   /* An opaque pointer to the root node of the tree. */
-  struct leaf_node *root;
+  void *root;
   /* The height of root node. */
   size_t height;
 };
