@@ -17,10 +17,14 @@
     exit(1);                                                                   \
   }
 
+#define DEALLOC_KEY(key) DEALLOC(key)
+#define DEALLOC_VALUE(value)
+#define IS_DEALLOC_ELEMENT 1
+
 /* The type of the keys, make sure you also modify COMPARE if you use anything
    other than integers. */
 #ifndef K
-#define K int
+#define K char *
 #endif
 
 /* The type of the values */
@@ -29,28 +33,25 @@
 #endif
 
 #ifndef COMPARE
-int compare(const K *x, const K *y) {
-  return *x == *y ? 0 : *x > *y ? 1 : -1;
-}
-#define COMPARE compare
+#define COMPARE(x, y) strcmp(*x, *y)
 #endif
 
-typedef struct BTreeMap {
+struct btree_map {
   /* The size of the BTreeMap.
 
      If `size` is non-zero `root`'s node must be non-null. */
   size_t size;
 
   /* An opaque pointer to the root node of the tree. */
-  void *root;
+  struct leaf_node *root;
   /* The height of root node. */
   size_t height;
-} BTreeMap;
+};
 
 /* Create and initialize a new BTreeMap. This function doesn't allocate. */
-static BTreeMap btree_map_new(void) {
+static struct btree_map btree_map_new(void) {
   /* root node is only null when size = 0. */
-  BTreeMap map;
+  struct btree_map map;
   map.size = 0;
   map.root = NULL;
   /* height is left uninitialized */
@@ -59,33 +60,33 @@ static BTreeMap btree_map_new(void) {
 
 /* Returns a pointer to the value associated to key `key` if any, or `NULL`
    if not found. Note that insert calls may invalidate the pointer. */
-V *btree_map_get(BTreeMap *map, const K *key);
+V *btree_map_get(struct btree_map *map, K const *key);
 
 /* Insert or update a value in the tree. May invalidate pointers returned by
    btree_map_get.
    **Note:** Don't call this function while iterating or you might invalidate
    the iterator. */
-void btree_map_insert(BTreeMap *map, K key, V value);
+void btree_map_insert(struct btree_map *map, K key, V value);
 
 /* Remove a key and its associated value from the map.
    **Note:** Don't call this function while iterating or you might invalidate
    the iterator. */
-void btree_map_remove(BTreeMap *map, const K *key);
+void btree_map_remove(struct btree_map *map, K const *key);
 
 /* Remove all elements from the map. */
-void btree_map_clear(BTreeMap *map);
+void btree_map_clear(struct btree_map *map);
 
 /* Deallocate the memory the map is using. */
-void btree_map_dealloc(BTreeMap *map);
+void btree_map_dealloc(struct btree_map *map);
 
-typedef struct BTreeMapIter {
+struct btree_map_iter {
   void *node;
   void **parents;
   unsigned short *indexes;
   size_t max_height;
   size_t height;
   unsigned short index;
-} BTreeMapIter;
+};
 
 /* Iterate through the map in sorted order (sorted by key). While iterating it
    is allowed to modify the keys and values since they're just pointers to their
@@ -93,16 +94,16 @@ typedef struct BTreeMapIter {
    While iterating btree_map_insert or btree_map_remove can cause errors.
    **Note:** the iterator has to allocate a small amount of memory to store
    pointers, so it must be deallocated using btree_map_iter_dealloc. */
-BTreeMapIter btree_map_iter(BTreeMap *map);
+struct btree_map_iter btree_map_iter(struct btree_map *map);
 
 /* Get the next item on the iterator. Returns true if there are more elements to
    iter through. Calling this function again after it returned false will keep
    returning false. */
-bool btree_map_iter_next(BTreeMapIter *it, K **key, V **value);
+bool btree_map_iter_next(struct btree_map_iter *it, K **key, V **value);
 
 /* Reset the iterator, starts over from the smallest element in the map. */
-void btree_map_iter_reset(BTreeMapIter *it);
+void btree_map_iter_reset(struct btree_map_iter *it);
 
-void btree_map_iter_dealloc(BTreeMapIter *it);
+void btree_map_iter_dealloc(struct btree_map_iter *it);
 
 #endif /* BTREE_H_ */
